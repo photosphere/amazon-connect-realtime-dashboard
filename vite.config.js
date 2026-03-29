@@ -6,6 +6,9 @@ export default defineConfig({
   root: ".",
   build: {
     outDir: "dist",
+    rollupOptions: {
+      input: "agent_metrics.html",
+    },
   },
   server: {
     port: 8080,
