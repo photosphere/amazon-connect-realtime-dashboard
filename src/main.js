@@ -110,10 +110,9 @@ function mergeResults(target, metricResults) {
   }
 }
 
-async function getAgentMetrics({ region, instanceId, accountId, accessKeyId, secretAccessKey, hours }) {
+async function getAgentMetrics({ region, instanceId, accountId, accessKeyId, secretAccessKey, hours, agentIds }) {
   const client = makeClient(region, accessKeyId, secretAccessKey);
-  const agentIds = await listAllAgentIds(client, instanceId);
-  if (!agentIds.length) return {};
+  if (!agentIds || !agentIds.length) return {};
 
   const endTime = new Date();
   const startTime = new Date(endTime - hours * 3600 * 1000);
@@ -173,38 +172,18 @@ function setStatus(type, text) {
   document.getElementById("status-text").textContent = text;
 }
 
-function renderMetrics(metrics) {
-  const container = document.getElementById("metrics-container");
-  const entries = Object.entries(metrics);
-  if (!entries.length) {
-    container.innerHTML = `<div class="empty-state">未找到坐席数据，请检查实例 ID 和权限配置</div>`;
-    return;
-  }
-  container.innerHTML = entries.map(([agentId, data]) => {
-    const name = resolveAgentName(agentId);
-    const initial = name.slice(0, 2).toUpperCase();
-    const cells = Object.entries(METRIC_LABELS).map(([key, meta]) => {
-      const raw = data[key];
-      let cls = "metric-value";
-      let display;
-      if (raw == null) { display = "N/A"; cls += " na"; }
-      else {
-        display = (Number.isInteger(raw) ? raw : raw.toFixed(2)) + " " + meta.unit;
-        if (meta.highlight) cls += " highlight";
-        else if (meta.warn) cls += " warn";
-      }
-      return `<div class="metric-cell"><div class="metric-label">${meta.label}</div><div class="${cls}">${display}</div></div>`;
-    }).join("");
-    return `<div class="agent-card"><div class="agent-card-header"><div class="agent-avatar">${initial}</div><div class="agent-id">${name}</div></div><div class="metrics-grid">${cells}</div></div>`;
-  }).join("");
-}
+function renderMetrics() {}
 
 function renderError(msg) {
-  document.getElementById("metrics-container").innerHTML = `<div class="error-state">⚠ ${msg}</div>`;
+  const panel = document.getElementById("agent-status-panel");
+  panel.style.display = "block";
+  document.getElementById("agent-status-list").innerHTML = `<div class="error-state">⚠ ${msg}</div>`;
 }
 
 function renderLoading() {
-  document.getElementById("metrics-container").innerHTML = `<div class="empty-state"><span class="spinner"></span>正在获取数据...</div>`;
+  const panel = document.getElementById("agent-status-panel");
+  panel.style.display = "block";
+  document.getElementById("agent-status-list").innerHTML = `<div class="empty-state"><span class="spinner"></span>正在获取数据...</div>`;
 }
 
 function getStatusBadgeClass(statusName) {
@@ -228,16 +207,23 @@ function formatDuration(startTimestamp) {
   return `${s}s`;
 }
 
-function renderAgentStatus(userDataList) {
+function renderAgentStatus(userDataList, metrics) {
   const panel = document.getElementById("agent-status-panel");
-  const container = document.getElementById("agent-status-list");
   panel.style.display = "block";
+  const container = document.getElementById("agent-status-list");
 
   if (!userDataList || !userDataList.length) {
     container.innerHTML = `<div class="status-empty">暂无在线坐席数据</div>`;
     return;
   }
 
+  const metricKeys = Object.entries(METRIC_LABELS);
+
+  // 表头：状态列 + 所有指标列
+  const metricHeaders = metricKeys.map(([, meta]) => `<th>${meta.label}</th>`).join("");
+  const thead = `<tr><th>坐席</th><th>状态</th><th>持续时间</th><th>联系数</th><th>路由配置</th>${metricHeaders}</tr>`;
+
+  // 表体
   const rows = userDataList.map((ud) => {
     const userId = ud.User?.Id ?? "N/A";
     const name = resolveAgentName(userId);
@@ -246,17 +232,28 @@ function renderAgentStatus(userDataList) {
     const duration = formatDuration(ud.Status?.StatusStartTimestamp);
     const contacts = (ud.Contacts ?? []).length;
     const routingProfile = ud.RoutingProfile?.Id ?? "N/A";
+    const agentMetrics = (metrics && metrics[userId]) || {};
+
+    const metricCells = metricKeys.map(([key, meta]) => {
+      const raw = agentMetrics[key];
+      if (raw == null) return `<td class="metric-val na">N/A</td>`;
+      const display = (Number.isInteger(raw) ? raw : raw.toFixed(2)) + " " + meta.unit;
+      const cls = meta.highlight ? "metric-val highlight" : meta.warn ? "metric-val warn" : "metric-val";
+      return `<td class="${cls}">${display}</td>`;
+    }).join("");
+
     return `<tr>
       <td>${name}</td>
       <td><span class="status-badge ${badgeCls}">${statusName}</span></td>
       <td>${duration}</td>
       <td>${contacts}</td>
       <td style="color:#64748b;font-size:0.78rem">${routingProfile}</td>
+      ${metricCells}
     </tr>`;
   }).join("");
 
   container.innerHTML = `<table class="status-table">
-    <thead><tr><th>坐席</th><th>状态</th><th>持续时间</th><th>联系数</th><th>路由配置</th></tr></thead>
+    <thead>${thead}</thead>
     <tbody>${rows}</tbody>
   </table>`;
 }
@@ -293,12 +290,18 @@ async function fetchAndRender() {
   renderLoading();
   setStatus("loading", "获取中...");
   try {
-    const [metrics, userDataList] = await Promise.all([
-      getAgentMetrics(cfg),
-      getCurrentUserData(cfg),
-    ]);
-    renderAgentStatus(userDataList);
-    renderMetrics(metrics);
+    // 1. 先获取坐席实时状态，从中提取 Agent ID
+    const userDataList = await getCurrentUserData(cfg);
+    const agentIds = userDataList
+      .map((ud) => ud.User?.Id)
+      .filter(Boolean);
+
+    // 2. 用 GetCurrentUserData 返回的 Agent ID 查询指标
+    const metrics = await getAgentMetrics({ ...cfg, agentIds });
+
+    // 3. 合并渲染：状态 + 指标
+    renderAgentStatus(userDataList, metrics);
+
     setStatus("ok", "运行中");
     document.getElementById("last-updated").textContent = `上次更新: ${new Date().toLocaleTimeString("zh-CN")}`;
     startCountdown(cfg.interval);
