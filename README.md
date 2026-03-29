@@ -67,3 +67,5 @@ npm run build
 ├── vite.config.js       # Vite 构建配置
 └── package.json
 ```
+## UI展示
+<img width="1187" height="671" alt="Image" src="https://github.com/user-attachments/assets/05bebdff-a497-40e0-bbe3-dade28da2eb3" />
