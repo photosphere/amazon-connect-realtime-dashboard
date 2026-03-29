@@ -172,18 +172,10 @@ function setStatus(type, text) {
   document.getElementById("status-text").textContent = text;
 }
 
-function renderMetrics() {}
-
 function renderError(msg) {
   const panel = document.getElementById("agent-status-panel");
   panel.style.display = "block";
   document.getElementById("agent-status-list").innerHTML = `<div class="error-state">⚠ ${msg}</div>`;
-}
-
-function renderLoading() {
-  const panel = document.getElementById("agent-status-panel");
-  panel.style.display = "block";
-  document.getElementById("agent-status-list").innerHTML = `<div class="empty-state"><span class="spinner"></span>正在获取数据...</div>`;
 }
 
 function getStatusBadgeClass(statusName) {
@@ -221,7 +213,7 @@ function renderAgentStatus(userDataList, metrics) {
 
   // 表头：状态列 + 所有指标列
   const metricHeaders = metricKeys.map(([, meta]) => `<th>${meta.label}</th>`).join("");
-  const thead = `<tr><th>坐席</th><th>状态</th><th>持续时间</th><th>联系数</th><th>路由配置</th>${metricHeaders}</tr>`;
+  const thead = `<tr><th>坐席</th><th>状态</th><th>持续时间</th><th>联系数</th>${metricHeaders}</tr>`;
 
   // 表体
   const rows = userDataList.map((ud) => {
@@ -231,7 +223,6 @@ function renderAgentStatus(userDataList, metrics) {
     const badgeCls = getStatusBadgeClass(statusName);
     const duration = formatDuration(ud.Status?.StatusStartTimestamp);
     const contacts = (ud.Contacts ?? []).length;
-    const routingProfile = ud.RoutingProfile?.Id ?? "N/A";
     const agentMetrics = (metrics && metrics[userId]) || {};
 
     const metricCells = metricKeys.map(([key, meta]) => {
@@ -247,7 +238,6 @@ function renderAgentStatus(userDataList, metrics) {
       <td><span class="status-badge ${badgeCls}">${statusName}</span></td>
       <td>${duration}</td>
       <td>${contacts}</td>
-      <td style="color:#64748b;font-size:0.78rem">${routingProfile}</td>
       ${metricCells}
     </tr>`;
   }).join("");
@@ -266,6 +256,29 @@ function startCountdown(interval) {
     document.getElementById("countdown").textContent = `${--secondsLeft}s 后刷新`;
     if (secondsLeft <= 0) clearInterval(countdownTimer);
   }, 1000);
+}
+
+// ── data.json 持久化 ─────────────────────────────────────────
+async function loadCachedData() {
+  try {
+    const res = await fetch("data.json?t=" + Date.now());
+    if (!res.ok) return null;
+    return await res.json();
+  } catch {
+    return null;
+  }
+}
+
+async function saveCachedData(data) {
+  try {
+    await fetch("/api/save-data", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(data, null, 2),
+    });
+  } catch (err) {
+    console.warn("保存 data.json 失败:", err);
+  }
 }
 
 // ── 主流程 ───────────────────────────────────────────────────
@@ -287,28 +300,52 @@ async function fetchAndRender() {
     renderError("请填写完整配置（实例 ID、Account ID 及 AWS Credential）");
     return;
   }
-  renderLoading();
+
+  // 1. 先从 data.json 加载缓存数据并立即渲染
+  const cached = await loadCachedData();
+  if (cached) {
+    // 恢复坐席名称缓存
+    if (cached.agentNames) {
+      for (const [id, name] of Object.entries(cached.agentNames)) {
+        agentNameCache.set(id, name);
+      }
+    }
+    renderAgentStatus(cached.userDataList ?? [], cached.metrics ?? {});
+    setStatus("ok", `显示缓存数据 (${cached.updatedAt ?? ""})`);
+    document.getElementById("last-updated").textContent = cached.updatedAt
+      ? `上次更新: ${cached.updatedAt}`
+      : "";
+  }
+
+  // 2. 尝试从 API 获取最新数据
   setStatus("loading", "获取中...");
   try {
-    // 1. 先获取坐席实时状态，从中提取 Agent ID
     const userDataList = await getCurrentUserData(cfg);
     const agentIds = userDataList
       .map((ud) => ud.User?.Id)
       .filter(Boolean);
-
-    // 2. 用 GetCurrentUserData 返回的 Agent ID 查询指标
     const metrics = await getAgentMetrics({ ...cfg, agentIds });
 
-    // 3. 合并渲染：状态 + 指标
+    // API 成功 → 渲染 + 保存 data.json
     renderAgentStatus(userDataList, metrics);
 
+    const updatedAt = new Date().toLocaleTimeString("zh-CN");
+    const agentNames = Object.fromEntries(agentNameCache);
+    await saveCachedData({ userDataList, metrics, agentNames, updatedAt });
+
     setStatus("ok", "运行中");
-    document.getElementById("last-updated").textContent = `上次更新: ${new Date().toLocaleTimeString("zh-CN")}`;
+    document.getElementById("last-updated").textContent = `上次更新: ${updatedAt}`;
     startCountdown(cfg.interval);
   } catch (err) {
     console.error(err);
-    setStatus("error", "请求失败");
-    renderError(err.message || "API 调用失败，请检查配置和网络");
+    // API 失败 → 如果有缓存数据则保持显示，不覆盖
+    if (cached) {
+      setStatus("error", "API 请求失败，显示缓存数据");
+    } else {
+      setStatus("error", "请求失败");
+      renderError(err.message || "API 调用失败，请检查配置和网络");
+    }
+    startCountdown(cfg.interval);
   }
 }
 
