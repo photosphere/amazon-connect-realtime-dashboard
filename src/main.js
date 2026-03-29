@@ -1,6 +1,7 @@
 import {
   ConnectClient,
   GetMetricDataV2Command,
+  GetCurrentUserDataCommand,
   ListUsersCommand,
 } from "@aws-sdk/client-connect";
 
@@ -42,6 +43,9 @@ let pollingTimer = null;
 let countdownTimer = null;
 let secondsLeft = 15;
 
+// ── 坐席名称缓存 (Id → Username) ────────────────────────────
+const agentNameCache = new Map();
+
 // ── 创建 ConnectClient ──────────────────────────────────────
 function makeClient(region, accessKeyId, secretAccessKey) {
   return new ConnectClient({
@@ -50,7 +54,7 @@ function makeClient(region, accessKeyId, secretAccessKey) {
   });
 }
 
-// ── 获取全部坐席 ID ──────────────────────────────────────────
+// ── 获取全部坐席 ID（同时缓存 Username）─────────────────────
 async function listAllAgentIds(client, instanceId) {
   const ids = [];
   let nextToken;
@@ -63,11 +67,18 @@ async function listAllAgentIds(client, instanceId) {
       })
     );
     for (const u of res.UserSummaryList ?? []) {
-      if (u.Id) ids.push(u.Id);
+      if (u.Id) {
+        ids.push(u.Id);
+        if (u.Username) agentNameCache.set(u.Id, u.Username);
+      }
     }
     nextToken = res.NextToken;
   } while (nextToken);
   return ids;
+}
+
+function resolveAgentName(agentId) {
+  return agentNameCache.get(agentId) || agentId;
 }
 
 // ── GetMetricDataV2 分页 ─────────────────────────────────────
@@ -129,6 +140,33 @@ async function getAgentMetrics({ region, instanceId, accountId, accessKeyId, sec
   return allResults;
 }
 
+// ── 获取坐席实时状态 (GetCurrentUserData) ────────────────────
+async function getCurrentUserData({ region, instanceId, accessKeyId, secretAccessKey }) {
+  const client = makeClient(region, accessKeyId, secretAccessKey);
+  const agentIds = await listAllAgentIds(client, instanceId);
+  if (!agentIds.length) return [];
+
+  const allUserData = [];
+  const BATCH = 100;
+  for (let i = 0; i < agentIds.length; i += BATCH) {
+    const batch = agentIds.slice(i, i + BATCH);
+    let nextToken;
+    do {
+      const res = await client.send(
+        new GetCurrentUserDataCommand({
+          InstanceId: instanceId,
+          Filters: { Agents: batch },
+          MaxResults: 100,
+          ...(nextToken && { NextToken: nextToken }),
+        })
+      );
+      allUserData.push(...(res.UserDataList ?? []));
+      nextToken = res.NextToken;
+    } while (nextToken);
+  }
+  return allUserData;
+}
+
 // ── UI 渲染 ──────────────────────────────────────────────────
 function setStatus(type, text) {
   document.getElementById("status-dot").className = `status-dot ${type === "ok" ? "" : type}`;
@@ -143,7 +181,8 @@ function renderMetrics(metrics) {
     return;
   }
   container.innerHTML = entries.map(([agentId, data]) => {
-    const initial = agentId.replace(/-.*/, "").slice(0, 2).toUpperCase();
+    const name = resolveAgentName(agentId);
+    const initial = name.slice(0, 2).toUpperCase();
     const cells = Object.entries(METRIC_LABELS).map(([key, meta]) => {
       const raw = data[key];
       let cls = "metric-value";
@@ -156,7 +195,7 @@ function renderMetrics(metrics) {
       }
       return `<div class="metric-cell"><div class="metric-label">${meta.label}</div><div class="${cls}">${display}</div></div>`;
     }).join("");
-    return `<div class="agent-card"><div class="agent-card-header"><div class="agent-avatar">${initial}</div><div class="agent-id">${agentId}</div></div><div class="metrics-grid">${cells}</div></div>`;
+    return `<div class="agent-card"><div class="agent-card-header"><div class="agent-avatar">${initial}</div><div class="agent-id">${name}</div></div><div class="metrics-grid">${cells}</div></div>`;
   }).join("");
 }
 
@@ -166,6 +205,60 @@ function renderError(msg) {
 
 function renderLoading() {
   document.getElementById("metrics-container").innerHTML = `<div class="empty-state"><span class="spinner"></span>正在获取数据...</div>`;
+}
+
+function getStatusBadgeClass(statusName) {
+  if (!statusName) return "other";
+  const s = statusName.toLowerCase();
+  if (s === "available") return "available";
+  if (s === "offline") return "offline";
+  if (s === "busy" || s === "on contact" || s === "error") return "busy";
+  return "other";
+}
+
+function formatDuration(startTimestamp) {
+  if (!startTimestamp) return "N/A";
+  const diff = Math.floor((Date.now() - new Date(startTimestamp).getTime()) / 1000);
+  if (diff < 0) return "0s";
+  const h = Math.floor(diff / 3600);
+  const m = Math.floor((diff % 3600) / 60);
+  const s = diff % 60;
+  if (h > 0) return `${h}h ${m}m`;
+  if (m > 0) return `${m}m ${s}s`;
+  return `${s}s`;
+}
+
+function renderAgentStatus(userDataList) {
+  const panel = document.getElementById("agent-status-panel");
+  const container = document.getElementById("agent-status-list");
+  panel.style.display = "block";
+
+  if (!userDataList || !userDataList.length) {
+    container.innerHTML = `<div class="status-empty">暂无在线坐席数据</div>`;
+    return;
+  }
+
+  const rows = userDataList.map((ud) => {
+    const userId = ud.User?.Id ?? "N/A";
+    const name = resolveAgentName(userId);
+    const statusName = ud.Status?.StatusName ?? "Unknown";
+    const badgeCls = getStatusBadgeClass(statusName);
+    const duration = formatDuration(ud.Status?.StatusStartTimestamp);
+    const contacts = (ud.Contacts ?? []).length;
+    const routingProfile = ud.RoutingProfile?.Id ?? "N/A";
+    return `<tr>
+      <td>${name}</td>
+      <td><span class="status-badge ${badgeCls}">${statusName}</span></td>
+      <td>${duration}</td>
+      <td>${contacts}</td>
+      <td style="color:#64748b;font-size:0.78rem">${routingProfile}</td>
+    </tr>`;
+  }).join("");
+
+  container.innerHTML = `<table class="status-table">
+    <thead><tr><th>坐席</th><th>状态</th><th>持续时间</th><th>联系数</th><th>路由配置</th></tr></thead>
+    <tbody>${rows}</tbody>
+  </table>`;
 }
 
 // ── 倒计时 ───────────────────────────────────────────────────
@@ -200,7 +293,11 @@ async function fetchAndRender() {
   renderLoading();
   setStatus("loading", "获取中...");
   try {
-    const metrics = await getAgentMetrics(cfg);
+    const [metrics, userDataList] = await Promise.all([
+      getAgentMetrics(cfg),
+      getCurrentUserData(cfg),
+    ]);
+    renderAgentStatus(userDataList);
     renderMetrics(metrics);
     setStatus("ok", "运行中");
     document.getElementById("last-updated").textContent = `上次更新: ${new Date().toLocaleTimeString("zh-CN")}`;
@@ -224,6 +321,7 @@ function stopPolling() {
   clearInterval(countdownTimer);
   pollingTimer = null;
   document.getElementById("countdown").textContent = "";
+  document.getElementById("agent-status-panel").style.display = "none";
   setStatus("", "已停止");
 }
 
