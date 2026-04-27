@@ -73,25 +73,11 @@
 </header>
 
 <div class="config-panel">
-  <div><label>AWS 区域</label><input id="cfg-region" value="us-east-1" placeholder="us-east-1" /></div>
-  <div><label>Connect 实例 ID</label><input id="cfg-instance-id" placeholder="xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx" /></div>
-  <div><label>AWS Account ID</label><input id="cfg-account-id" placeholder="123456789012" /></div>
   <div><label>查询时间范围（小时）</label><input id="cfg-hours" type="number" value="8" min="1" max="168" /></div>
   <div><label>刷新周期（秒）</label><input id="cfg-interval" type="number" value="15" min="5" max="3600" /></div>
   <div class="btn-row">
     <button class="btn btn-primary" id="btn-start">启动</button>
     <button class="btn btn-danger" id="btn-stop">停止</button>
-  </div>
-</div>
-
-<div class="credential-section">
-  <button class="credential-toggle" id="cred-toggle">
-    <span>🔑 AWS Credential 配置</span>
-    <span class="toggle-icon">▼</span>
-  </button>
-  <div class="credential-body" id="cred-body">
-    <div><label>AWS Access Key ID</label><input id="cfg-access-key" type="password" placeholder="AKIA..." /></div>
-    <div><label>AWS Secret Access Key</label><input id="cfg-secret-key" type="password" placeholder="Secret..." /></div>
   </div>
 </div>
 
