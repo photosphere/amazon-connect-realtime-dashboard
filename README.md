@@ -126,3 +126,5 @@ npm start       # 以生产模式启动后端，自动托管 dist/ 静态文件
 - **实时状态**（`GetCurrentUserData`）：坐席当前状态（Available / Offline / Busy 等）、状态持续时间、当前联系数
 
 数据按配置的刷新周期（默认 15 秒）轮询更新。
+
+<img width="1511" height="328" alt="Image" src="https://github.com/user-attachments/assets/3d0d8d68-1cda-4d27-b20b-cad57c7e4a77" />
